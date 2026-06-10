@@ -1,0 +1,210 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Pico Spool Monitor v2</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; background: #0f172a; color: #e5e7eb; }
+    .wrap { max-width: 900px; margin: 0 auto; padding: 18px; }
+    .top { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+    h1 { margin: 0; font-size: 1.6rem; }
+    .muted { color: #94a3b8; }
+    .card { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 14px; margin-bottom: 14px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+    .lane { border: 1px solid #334155; border-radius: 12px; padding: 14px; text-align: center; background: #020617; }
+    .loaded { background: #052e16; border-color: #166534; color: #bbf7d0; }
+    .empty { background: #3f1112; border-color: #991b1b; color: #fecaca; }
+    .ignored { opacity: 0.6; }
+    .pill { border: 1px solid #334155; border-radius: 999px; padding: 8px 10px; background: #020617; }
+    .alert { display: none; background: #7f1d1d; border: 1px solid #b91c1c; border-radius: 12px; padding: 12px; margin-bottom: 14px; font-weight: bold; }
+    .events { max-height: 240px; overflow-y: auto; display: grid; gap: 8px; }
+    .event { border: 1px solid #334155; border-radius: 10px; padding: 10px; background: #020617; }
+    pre { white-space: pre-wrap; word-break: break-word; background: #020617; border: 1px solid #334155; border-radius: 10px; padding: 10px; }
+    button { padding: 10px 12px; border-radius: 10px; border: 1px solid #334155; background: #1f2937; color: #e5e7eb; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <h1>Pico Spool Monitor v2</h1>
+        <div class="muted">Lightweight dashboard. One API call every 5 seconds.</div>
+      </div>
+      <div id="health" class="pill">Loading...</div>
+    </div>
+
+    <div id="alert" class="alert"></div>
+
+    <div class="card">
+      <h2>Device</h2>
+      <div id="device" class="muted">Loading...</div>
+    </div>
+
+    <div class="card">
+      <h2>Spool Lanes</h2>
+      <div id="lanes" class="grid"></div>
+    </div>
+
+<div class="card">
+  <h2>Active Lanes</h2>
+  <div id="activeLaneControls" class="events"></div>
+  <button onclick="saveActiveLanes()" style="margin-top:10px;">Save Active Lanes</button>
+</div>
+
+    <div class="card">
+      <h2>Events</h2>
+      <div id="events" class="events"><div class="muted">No events yet.</div></div>
+    </div>
+
+    <div class="card">
+      <h2>Debug</h2>
+      <button onclick="loadDashboard()">Refresh Now</button>
+      <pre id="debug">{}</pre>
+    </div>
+  </div>
+
+<script>
+let busy = false;
+let timer = null;
+let laneCount = 0;
+
+function setHealth(ok, text) {
+  const el = document.getElementById('health');
+  el.textContent = text;
+  el.style.borderColor = ok ? '#166534' : '#b91c1c';
+}
+
+function updateAlert(alerts, bad) {
+  const el = document.getElementById('alert');
+  alerts = (alerts || []).map(Number).sort((a,b)=>a-b);
+  bad = (bad || []).map(Number).sort((a,b)=>a-b);
+
+  if (!alerts.length && !bad.length) {
+    el.style.display = 'none';
+    return;
+  }
+
+  let parts = [];
+  if (alerts.length) parts.push('EMPTY: Lane(s) ' + alerts.join(', '));
+  if (bad.length) parts.push('BAD SWITCH: Lane(s) ' + bad.join(', '));
+  el.textContent = '⚠ ' + parts.join(' | ');
+  el.style.display = 'block';
+}
+
+function renderLanes(state, laneCount) {
+  const box = document.getElementById('lanes');
+  const spools = state.spools || {};
+  const active = state.active_lanes || {};
+
+  let html = '';
+  for (let i = 1; i <= laneCount; i++) {
+    const id = String(i);
+    const isActive = active[id] !== false;
+    const val = spools[id] ?? 0;
+    let cls = 'lane ';
+    let text = 'Empty';
+
+    if (!isActive) {
+      cls += 'ignored';
+      text = 'Ignored';
+    } else if (val === 1) {
+      cls += 'loaded';
+      text = 'Loaded';
+    } else {
+      cls += 'empty';
+      text = 'Empty';
+    }
+
+    html += `<div class="${cls}"><strong>Lane ${i}</strong><br>${text}</div>`;
+  }
+  box.innerHTML = html;
+}
+
+function renderEvents(events) {
+  const box = document.getElementById('events');
+  if (!events || !events.length) {
+    box.innerHTML = '<div class="muted">No events yet.</div>';
+    return;
+  }
+  box.innerHTML = events.slice().reverse().map(e =>
+    `<div class="event"><strong>${e.type}</strong> - Lane ${e.lane}<br><span class="muted">${e.time}${e.detail ? ' | ' + e.detail : ''}</span></div>`
+  ).join('');
+}
+
+function renderActiveLaneControls(active) {
+  const box = document.getElementById('activeLaneControls');
+  box.innerHTML = '';
+
+  for (let i = 1; i <= laneCount; i++) {
+    const key = String(i);
+    const checked = active[key] ? 'checked' : '';
+
+    box.innerHTML += `
+      <label class="event">
+        <span>Lane ${i}</span>
+        <input id="active${i}" type="checkbox" ${checked}>
+      </label>
+    `;
+  }
+}
+
+async function loadDashboard() {
+  if (busy) return;
+  busy = true;
+
+  try {
+    const res = await fetch('/api/dashboard');
+    const data = await res.json();
+    const device = data.device || {};
+    const state = data.state || {};
+    const events = data.events || [];
+    const spools = state.spools || {};
+    const active = state.active_lanes || {};
+
+    laneCount = device.lane_count || Object.keys(spools).length || 0;
+
+    renderActiveLaneControls(active);
+
+    document.getElementById('device').textContent =
+      `Mode: ${device.network_mode} | SSID: ${device.connected_ssid || 'none'} | IP: ${device.ip || 'none'} | Lanes: ${device.lane_count}`;
+
+    renderLanes(state, device.lane_count || 0);
+    renderEvents(events);
+    updateAlert(state.alerts || [], state.bad_switches || []);
+
+    document.getElementById('debug').textContent = JSON.stringify(data, null, 2);
+    setHealth(true, 'API Online');
+  } catch (err) {
+    setHealth(false, 'API Error');
+  } finally {
+    busy = false;
+  }
+}
+
+async function saveActiveLanes() {
+  const active_lanes = {};
+
+  for (let i = 1; i <= laneCount; i++) {
+    const box = document.getElementById('active' + i);
+    active_lanes[String(i)] = box ? box.checked : true;
+  }
+
+  try {
+    await fetch('/api/active-lanes', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({active_lanes})
+    });
+
+    await loadDashboard();
+  } catch (err) {
+    setHealth(false, 'Save Failed');
+  }
+}
+
+loadDashboard();
+timer = setInterval(loadDashboard, 5000);
+</script>
+</body>
+</html>
